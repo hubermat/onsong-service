@@ -1,0 +1,17 @@
+{
+  "name": "onsong-service",
+  "version": "1.0.0",
+  "description": "Middle-layer service for routing requests between ChurchTools and OnSong proxies",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup-cert": "node setup-cert.js"
+  },
+  "keywords": ["websocket", "proxy", "onsong", "churchtools"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.14.2",
+    "express": "^4.18.2"
+  }
+}
