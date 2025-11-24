@@ -198,13 +198,15 @@ app.all('/api/*', async (req, res) => {
 
     const targetPort = req.headers['onsongport'] || 80;
 
+    const body = await req.text();
+
     const response = await sendToProxy(conn, 'api-request', {
       targetIp: targetIp,
       targetPort: parseInt(targetPort, 10),
       method: req.method,
       path: req.url,
       headers: forwardHeaders,
-      body: req.body
+      body: body
     });
 
     if (response.success) {
