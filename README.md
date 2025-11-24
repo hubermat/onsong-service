@@ -383,6 +383,36 @@ wscat -c wss://onsong.your-domain.com
 - Ensure churchToolsUrl in proxy matches referrer hostname exactly
 - Restart proxy after config changes
 
+### CORS Errors
+
+**Error:** `CORS policy: No 'Access-Control-Allow-Origin' header is present`
+
+**Causes:**
+- Request origin not allowed by CORS policy
+- Nginx not forwarding Origin header
+- Service needs restart after code changes
+
+**Solutions:**
+1. Check the Origin header is being sent from browser
+2. Verify nginx configuration forwards Origin and Referer headers:
+   ```nginx
+   proxy_set_header Origin $http_origin;
+   proxy_set_header Referer $http_referer;
+   ```
+3. Restart onsong-service after updating CORS configuration
+4. For development, temporarily test with curl to verify service works:
+   ```bash
+   curl https://onsong.your-domain.com/health \
+     -H "Origin: https://test.church.tools"
+   ```
+
+**Allowed Origins:**
+- All `*.church.tools` domains
+- `localhost` and `127.0.0.1`
+- `*.test` domains
+
+To add more origins, edit the CORS middleware in server.js (line 32-55).
+
 ### Timeouts
 
 **Error:** `Gateway timeout` (504)
@@ -445,7 +475,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/onsong.your-domain.com/privkey.pem;
 
     location / {
-        proxy_pass https://localhost:8443;
+        proxy_pass http://localhost:8443;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -453,11 +483,18 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Origin $http_origin;
+        proxy_set_header Referer $http_referer;
     }
 }
 ```
 
 Then run service on port 8443 as non-root user.
+
+**Note:** The service now runs HTTP internally and nginx handles SSL termination. CORS is enabled for:
+- All `*.church.tools` domains
+- `localhost` and `127.0.0.1` (for testing)
+- `*.test` domains (for testing)
 
 ## Performance
 

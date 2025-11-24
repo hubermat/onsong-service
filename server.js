@@ -1,32 +1,60 @@
-const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const WebSocket = require('ws');
 const { URL } = require('url');
 
-const PORT = process.env.PORT || 8443;
+const PORT = process.env.PORT || 3001;
+
+// Note: SSL certificates are optional when using nginx for SSL termination
+// If you need HTTPS directly from Node.js, uncomment the certificate loading below
 const certDir = path.join(__dirname, 'certs');
 const keyPath = path.join(certDir, 'key.pem');
 const certPath = path.join(certDir, 'cert.pem');
 
-// Check if certificates exist
-if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
-  console.error('SSL certificates not found!');
-  console.error('Please run: npm run setup-cert');
-  console.error('For production, use certificates from a trusted CA.');
-  process.exit(1);
-}
-
-// Load SSL certificates
-const sslOptions = {
-  key: fs.readFileSync(keyPath),
-  cert: fs.readFileSync(certPath)
-};
+// Uncomment for direct HTTPS (without nginx):
+// if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+//   console.error('SSL certificates not found!');
+//   console.error('Please run: npm run setup-cert');
+//   process.exit(1);
+// }
+//
+// const sslOptions = {
+//   key: fs.readFileSync(keyPath),
+//   cert: fs.readFileSync(certPath)
+// };
 
 // Create Express app
 const app = express();
 app.use(express.json());
+
+// CORS middleware
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  // Allow requests from church.tools domains and localhost for testing
+  if (origin) {
+    if (origin.endsWith('.church.tools') ||
+        origin.endsWith('.krz.tools') ||
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1') ||
+        origin.includes('.test')) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-AUTH, ONSONGIP, ONSONGPORT');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  next();
+});
 
 // Connection registry: Map of churchToolsUrl -> { secret, ws, requestHandlers }
 const connections = new Map();
@@ -204,7 +232,8 @@ app.all('/api/*', async (req, res) => {
 });
 
 // Create HTTPS server
-const server = https.createServer(sslOptions, app);
+//const server = https.createServer(sslOptions, app);
+const server = http.createServer(app);
 
 // Create WebSocket server
 const wss = new WebSocket.Server({ server });
@@ -294,8 +323,8 @@ server.listen(PORT, () => {
   console.log('\n========================================');
   console.log('OnSong Service Started');
   console.log('========================================');
-  console.log(`HTTPS Port: ${PORT}`);
-  console.log(`WebSocket: wss://your-domain:${PORT}`);
+  console.log(`HTTP Port: ${PORT} (SSL handled by nginx)`);
+  console.log(`WebSocket: ws://localhost:${PORT} (proxied to wss:// by nginx)`);
   console.log('========================================');
   console.log('\nEndpoints:');
   console.log('  GET  /health                - Health check');
@@ -305,6 +334,11 @@ server.listen(PORT, () => {
   console.log('  X-AUTH    - Authentication secret');
   console.log('  ONSONGIP  - Target device IP (for /api)');
   console.log('  Referer   - ChurchTools URL');
+  console.log('\nCORS Enabled for:');
+  console.log('  *.church.tools domains');
+  console.log('  *.krz.tools domains');
+  console.log('  localhost/127.0.0.1 (testing)');
+  console.log('  *.test domains (testing)');
   console.log('========================================\n');
 });
 
