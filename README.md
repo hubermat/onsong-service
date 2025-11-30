@@ -148,6 +148,101 @@ Check service status and see active connections.
 }
 ```
 
+### Download Proxy Executable
+
+**GET /download**
+
+Generates and downloads a ZIP package containing the OnSong proxy with embedded configuration.
+
+**Query Parameters:**
+- `os` (required): Target operating system - one of: `macos`, `linux`, `windows`
+- `churchToolsUrl` (required): Your ChurchTools instance hostname (e.g., `mychurch.church.tools`)
+- `secret` (required): Authentication secret to embed in the executable
+
+**Example Request (macOS/Linux):**
+```bash
+curl "https://onsong.feg-karlsruhe.de:443/download?os=macos&churchToolsUrl=mychurch.church.tools&secret=my-secret-key" \
+  -o onsong-proxy-macos.zip
+
+# Unzip the package
+unzip onsong-proxy-macos.zip
+
+# Install as a system service (recommended)
+./onsong-proxy --install
+
+# Or run manually
+./onsong-proxy
+```
+
+**Windows Example:**
+```bash
+curl "https://onsong.feg-karlsruhe.de:443/download?os=windows&churchToolsUrl=mychurch.church.tools&secret=my-secret-key" \
+  -o onsong-proxy-windows.zip
+
+# Extract the ZIP file, then run as administrator:
+onsong-proxy.exe --install
+
+# Or run manually:
+onsong-proxy.exe
+```
+
+**Package Contents:**
+- `onsong-proxy` (or `onsong-proxy.exe` on Windows) - Standalone executable
+- `INSTALL.md` - Platform-specific installation instructions
+
+**Service Installation:**
+
+The executable includes built-in service installation for automatic startup on system boot:
+
+- **macOS:** Installs as launchd service in `~/Library/LaunchAgents/`
+- **Windows:** Installs as scheduled task with SYSTEM privileges
+- **Linux:** Installs as systemd service (requires sudo)
+
+```bash
+# Install as service (auto-start on boot)
+./onsong-proxy --install
+
+# Uninstall service
+./onsong-proxy --uninstall
+```
+
+**Important Notes:**
+
+- **macOS Security:** You may see "Cannot be opened because the developer cannot be verified." Go to System Settings → Privacy & Security → Allow Anyway. See [CODE_SIGNING.md](./CODE_SIGNING.md) for details.
+- **Windows SmartScreen:** Click "More info" → "Run anyway" if Windows Defender blocks the executable.
+- **User-Friendly:** Double-click the executable from Finder/Explorer - no terminal knowledge required!
+
+**How It Works:**
+1. Service receives request with OS, ChurchTools URL, and secret
+2. Creates temporary build directory with unique ID
+3. Copies proxy template and replaces configuration placeholders:
+   - `serviceUrl`: Fixed to `wss://onsong.feg-karlsruhe.de:443`
+   - `churchToolsUrl`: From query parameter
+   - `secret`: From query parameter
+4. Installs dependencies with `npm install --production`
+5. Builds standalone executable with `pkg` for target platform
+6. Creates ZIP package with executable and INSTALL.md
+7. Streams ZIP file to client
+8. Cleans up temporary build directory
+
+**Features:**
+- No configuration file needed - everything is embedded
+- Single executable file - no dependencies to install
+- Self-installing as system service
+- Works on macOS, Linux, and Windows
+- Automatic cleanup of build artifacts
+- Concurrent builds supported (unique temp directories)
+- Includes user-friendly installation guide
+
+**Build Times:**
+- First build: ~2-3 minutes (npm install + pkg compilation)
+- Subsequent builds: ~1-2 minutes (cached dependencies)
+
+**ZIP Package Sizes:**
+- macOS: ~50-70 MB
+- Linux: ~50-70 MB
+- Windows: ~50-70 MB
+
 ### Device Discovery
 
 **GET /discover**

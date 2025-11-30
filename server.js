@@ -4,8 +4,15 @@ const path = require('path');
 const express = require('express');
 const WebSocket = require('ws');
 const { URL } = require('url');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const crypto = require('crypto');
+const archiver = require('archiver');
+
+const execAsync = promisify(exec);
 
 const PORT = process.env.PORT || 3001;
+const SERVICE_URL = 'wss://onsong.feg-karlsruhe.de:443';
 
 // Note: SSL certificates are optional when using nginx for SSL termination
 // If you need HTTPS directly from Node.js, uncomment the certificate loading below
@@ -45,7 +52,7 @@ app.use((req, res, next) => {
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-AUTH, ONSONGIP, ONSONGPORT');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-AUTH, X-ID, ONSONGIP, ONSONGPORT');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
 
   // Handle preflight requests
@@ -56,7 +63,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Connection registry: Map of churchToolsUrl -> { secret, ws, requestHandlers }
+// Connection registry: Map of "churchToolsUrl:uuid" -> { churchToolsUrl, secret, uuid, location, public, ws, requestHandlers }
 const connections = new Map();
 
 // Request ID counter
@@ -80,6 +87,27 @@ function findConnection(churchToolsUrl, secret) {
     return null;
   }
   return conn;
+}
+
+// Find and authenticate connection with UUID validation and optional secret check
+function findAndAuthenticateConnection(churchToolsUrl, secret, uuid) {
+  if (!uuid) {
+    return { error: 'Missing UUID', status: 401 };
+  }
+
+  const connectionKey = `${churchToolsUrl}:${uuid}`;
+  const conn = connections.get(connectionKey);
+
+  if (!conn) {
+    return { error: 'No proxy connected', status: 403 };
+  }
+
+  // Only check secret if proxy is not public
+  if (!conn.public && conn.secret !== secret) {
+    return { error: 'Invalid secret', status: 403 };
+  }
+
+  return { conn };
 }
 
 // Send request to proxy and wait for response
@@ -115,10 +143,197 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Discover endpoint
-app.get('/discover', async (req, res) => {
+// Helper function to build proxy executable
+async function buildProxyExecutable(os, churchToolsUrl, secret, location, isPublic, uuid) {
+  const buildId = crypto.randomBytes(16).toString('hex');
+  const tempDir = path.join(__dirname, 'downloads', buildId);
+  const templateDir = path.join(__dirname, 'proxy-template');
+
+  try {
+    // Create temp directory
+    await fs.promises.mkdir(tempDir, { recursive: true });
+    console.log(`Created temp directory: ${tempDir}`);
+
+    // Copy proxy-template to temp directory
+    await fs.promises.cp(templateDir, tempDir, { recursive: true });
+    console.log(`Copied proxy-template to temp directory`);
+
+    // Read server.js and replace placeholders
+    const serverJsPath = path.join(tempDir, 'server.js');
+    let serverJs = await fs.promises.readFile(serverJsPath, 'utf8');
+
+    serverJs = serverJs.replace('__SERVICE_URL__', SERVICE_URL);
+    serverJs = serverJs.replace('__CHURCHTOOLS_URL__', churchToolsUrl);
+    serverJs = serverJs.replace('__SECRET__', secret);
+    serverJs = serverJs.replace('__LOCATION__', location);
+    serverJs = serverJs.replace('__PUBLIC__', isPublic.toString());
+    serverJs = serverJs.replace('__UUID__', uuid);
+
+    await fs.promises.writeFile(serverJsPath, serverJs);
+    console.log(`Replaced configuration placeholders`);
+
+    // Run npm install
+    console.log(`Installing dependencies in ${tempDir}`);
+    await execAsync('npm install --production', { cwd: tempDir });
+    console.log(`Dependencies installed`);
+
+    // Determine pkg target based on OS
+    const pkgTargets = {
+      'macos': 'node18-macos-x64',
+      'linux': 'node18-linux-x64',
+      'windows': 'node18-win-x64'
+    };
+
+    const target = pkgTargets[os];
+    if (!target) {
+      throw new Error(`Unsupported OS: ${os}`);
+    }
+
+    const outputName = os === 'windows' ? 'onsong-proxy.exe' : 'onsong-proxy';
+    const outputPath = path.join(tempDir, outputName);
+
+    // Build executable with pkg
+    console.log(`Building executable for ${os} (target: ${target})`);
+    const pkgCommand = `npx pkg server.js --target ${target} --output ${outputName}`;
+    await execAsync(pkgCommand, { cwd: tempDir, maxBuffer: 50 * 1024 * 1024 });
+    console.log(`Executable built: ${outputPath}`);
+
+    // Check if executable exists
+    if (!fs.existsSync(outputPath)) {
+      throw new Error(`Executable not found at ${outputPath}`);
+    }
+
+    // Create ZIP file with executable and INSTALL.md
+    const zipName = os === 'windows' ? 'onsong-proxy-windows.zip' : `onsong-proxy-${os}.zip`;
+    const zipPath = path.join(tempDir, zipName);
+
+    console.log(`Creating ZIP package: ${zipPath}`);
+    await createZipPackage(tempDir, outputPath, outputName, zipPath);
+    console.log(`ZIP package created`);
+
+    return { buildId, zipPath, zipName };
+  } catch (error) {
+    // Clean up on error
+    try {
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.error(`Error cleaning up ${tempDir}:`, cleanupError.message);
+    }
+    throw error;
+  }
+}
+
+// Helper function to create ZIP package
+function createZipPackage(tempDir, executablePath, executableName, zipPath) {
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(zipPath);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+
+    output.on('close', () => {
+      console.log(`ZIP created: ${archive.pointer()} total bytes`);
+      resolve();
+    });
+
+    archive.on('error', (err) => {
+      reject(err);
+    });
+
+    archive.pipe(output);
+
+    // Add executable
+    archive.file(executablePath, { name: executableName });
+
+    // Add INSTALL.md
+    const installMdPath = path.join(tempDir, 'INSTALL.md');
+    if (fs.existsSync(installMdPath)) {
+      archive.file(installMdPath, { name: 'INSTALL.md' });
+    }
+
+    archive.finalize();
+  });
+}
+
+// Helper function to cleanup build directory
+async function cleanupBuild(buildId) {
+  const tempDir = path.join(__dirname, 'downloads', buildId);
+  try {
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+    console.log(`Cleaned up temp directory: ${tempDir}`);
+  } catch (error) {
+    console.error(`Error cleaning up ${tempDir}:`, error.message);
+  }
+}
+
+// Download endpoint
+app.get('/download', async (req, res) => {
+  const { os, churchToolsUrl, secret, location, public: publicParam } = req.query;
+
+  // Validate parameters
+  if (!os || !churchToolsUrl || !secret) {
+    return res.status(400).json({
+      error: 'Missing required parameters',
+      message: 'Required query parameters: os (macos|linux|windows), churchToolsUrl, secret'
+    });
+  }
+
+  if (!['macos', 'linux', 'windows'].includes(os)) {
+    return res.status(400).json({
+      error: 'Invalid OS',
+      message: 'OS must be one of: macos, linux, windows'
+    });
+  }
+
+  // Parse optional parameters with defaults
+  const proxyLocation = location || '';
+  const isPublic = publicParam === 'true' || publicParam === '1';
+
+  // Generate UUID for this proxy instance
+  const proxyUuid = crypto.randomUUID();
+
+  console.log(`Building proxy executable for ${os}, ChurchTools: ${churchToolsUrl}, Location: ${proxyLocation}, Public: ${isPublic}, UUID: ${proxyUuid}`);
+
+  try {
+    const { buildId, zipPath, zipName } = await buildProxyExecutable(os, churchToolsUrl, secret, proxyLocation, isPublic, proxyUuid);
+
+    // Set appropriate headers for ZIP file
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+
+    // Stream the ZIP file
+    const fileStream = fs.createReadStream(zipPath);
+
+    fileStream.on('error', (error) => {
+      console.error('Error streaming file:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Error streaming file' });
+      }
+    });
+
+    fileStream.on('end', async () => {
+      console.log(`File streamed successfully: ${zipName}`);
+      // Clean up after streaming is complete
+      await cleanupBuild(buildId);
+    });
+
+    fileStream.pipe(res);
+  } catch (error) {
+    console.error('Error building executable:', error);
+    res.status(500).json({
+      error: 'Build failed',
+      message: error.message
+    });
+  }
+});
+
+// Proxy check endpoint - validates registration with full authentication (including secret for public proxies)
+app.get('/proxycheck', async (req, res) => {
   const referrer = req.headers['referer'] || req.headers['referrer'];
   const secret = req.headers['x-auth'];
+  const uuid = req.headers['x-id'];
+
+  if (!uuid) {
+    return res.status(401).json({ error: 'Missing X-ID header' });
+  }
 
   if (!secret) {
     return res.status(401).json({ error: 'Missing X-AUTH header' });
@@ -129,13 +344,41 @@ app.get('/discover', async (req, res) => {
     return res.status(400).json({ error: 'Invalid or missing referrer' });
   }
 
-  const conn = findConnection(churchToolsUrl, secret);
-  if (!conn) {
-    return res.status(403).json({
-      error: 'No proxy connected',
-      message: 'No OnSong proxy is connected for this ChurchTools instance with the provided credentials'
+  const connectionKey = `${churchToolsUrl}:${uuid}`;
+  const conn = connections.get(connectionKey);
+
+  // Check if connection exists and secret matches (always check secret for proxycheck)
+  if (!conn || conn.secret !== secret) {
+    return res.status(200).json({ registered: false });
+  }
+
+  return res.status(200).json({ registered: true });
+});
+
+// Discover endpoint
+app.get('/discover', async (req, res) => {
+  const referrer = req.headers['referer'] || req.headers['referrer'];
+  const secret = req.headers['x-auth'];
+  const uuid = req.headers['x-id'];
+
+  if (!uuid) {
+    return res.status(401).json({ error: 'Missing X-ID header' });
+  }
+
+  const churchToolsUrl = getChurchToolsUrl(referrer);
+  if (!churchToolsUrl) {
+    return res.status(400).json({ error: 'Invalid or missing referrer' });
+  }
+
+  const authResult = findAndAuthenticateConnection(churchToolsUrl, secret, uuid);
+  if (authResult.error) {
+    return res.status(authResult.status).json({
+      error: authResult.error,
+      message: authResult.error
     });
   }
+
+  const conn = authResult.conn;
 
   try {
     const response = await sendToProxy(conn, 'discover', {});
@@ -164,10 +407,11 @@ app.get('/discover', async (req, res) => {
 app.all('/api/*', async (req, res) => {
   const referrer = req.headers['referer'] || req.headers['referrer'];
   const secret = req.headers['x-auth'];
+  const uuid = req.headers['x-id'];
   const targetIp = req.headers['onsongip'];
 
-  if (!secret) {
-    return res.status(401).json({ error: 'Missing X-AUTH header' });
+  if (!uuid) {
+    return res.status(401).json({ error: 'Missing X-ID header' });
   }
 
   if (!targetIp) {
@@ -179,13 +423,15 @@ app.all('/api/*', async (req, res) => {
     return res.status(400).json({ error: 'Invalid or missing referrer' });
   }
 
-  const conn = findConnection(churchToolsUrl, secret);
-  if (!conn) {
-    return res.status(403).json({
-      error: 'No proxy connected',
-      message: 'No OnSong proxy is connected for this ChurchTools instance'
+  const authResult = findAndAuthenticateConnection(churchToolsUrl, secret, uuid);
+  if (authResult.error) {
+    return res.status(authResult.status).json({
+      error: authResult.error,
+      message: authResult.error
     });
   }
+
+  const conn = authResult.conn;
 
   try {
     // Forward headers (excluding proxy-specific ones)
@@ -241,7 +487,7 @@ const wss = new WebSocket.Server({ server });
 wss.on('connection', (ws) => {
   console.log('New WebSocket connection');
 
-  let registeredUrl = null;
+  let registeredKey = null;
 
   ws.on('message', (data) => {
     try {
@@ -249,28 +495,32 @@ wss.on('connection', (ws) => {
 
       if (message.type === 'register') {
         // Register proxy connection
-        const { churchToolsUrl, secret, proxyVersion } = message;
+        const { churchToolsUrl, secret, proxyVersion, uuid, location, public: isPublic } = message;
 
-        if (!churchToolsUrl || !secret) {
+        if (!churchToolsUrl || !secret || !uuid) {
           ws.send(JSON.stringify({
             type: 'error',
-            message: 'Missing churchToolsUrl or secret'
+            message: 'Missing churchToolsUrl, secret, or uuid'
           }));
           ws.close();
           return;
         }
 
-        registeredUrl = churchToolsUrl;
+        registeredKey = `${churchToolsUrl}:${uuid}`;
 
-        connections.set(churchToolsUrl, {
+        connections.set(registeredKey, {
+          churchToolsUrl: churchToolsUrl,
           secret: secret,
+          uuid: uuid,
+          location: location || '',
+          public: isPublic || false,
           ws: ws,
           requestHandlers: {},
           registeredAt: new Date(),
           proxyVersion: proxyVersion || 'unknown'
         });
 
-        console.log(`Proxy registered: ${churchToolsUrl} (version: ${proxyVersion})`);
+        console.log(`Proxy registered: ${churchToolsUrl} (version: ${proxyVersion}, UUID: ${uuid}, location: ${location || 'none'}, public: ${isPublic || false})`);
         console.log(`Active connections: ${connections.size}`);
 
         ws.send(JSON.stringify({
@@ -279,15 +529,15 @@ wss.on('connection', (ws) => {
         }));
       } else if (message.type === 'discover-response' || message.type === 'api-response') {
         // Handle response from proxy
-        if (registeredUrl) {
-          const conn = connections.get(registeredUrl);
+        if (registeredKey) {
+          const conn = connections.get(registeredKey);
           if (conn && conn.requestHandlers[message.requestId]) {
             conn.requestHandlers[message.requestId](message);
           }
         }
       } else if (message.type === 'pong') {
         // Pong response to keep-alive ping
-        console.log(`Pong received from ${registeredUrl}`);
+        console.log(`Pong received from ${registeredKey}`);
       }
     } catch (error) {
       console.error('WebSocket message error:', error.message);
@@ -295,9 +545,9 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (registeredUrl) {
-      console.log(`Proxy disconnected: ${registeredUrl}`);
-      connections.delete(registeredUrl);
+    if (registeredKey) {
+      console.log(`Proxy disconnected: ${registeredKey}`);
+      connections.delete(registeredKey);
       console.log(`Active connections: ${connections.size}`);
     } else {
       console.log('Unregistered connection closed');
@@ -328,10 +578,15 @@ server.listen(PORT, () => {
   console.log('========================================');
   console.log('\nEndpoints:');
   console.log('  GET  /health                - Health check');
+  console.log('  GET  /download              - Download proxy executable');
+  console.log('  GET  /proxycheck            - Check if proxy is registered (always requires secret)');
   console.log('  GET  /discover              - Discover OnSong devices');
   console.log('  ALL  /api/*                 - Proxy API requests');
   console.log('\nRequired Headers:');
+  console.log('  X-ID      - Proxy UUID (required for /proxycheck, /discover, and /api)');
   console.log('  X-AUTH    - Authentication secret');
+  console.log('              - Always required for /proxycheck');
+  console.log('              - Required for /discover and /api if proxy is not public');
   console.log('  ONSONGIP  - Target device IP (for /api)');
   console.log('  Referer   - ChurchTools URL');
   console.log('\nCORS Enabled for:');

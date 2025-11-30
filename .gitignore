@@ -4,6 +4,10 @@ node_modules/
 # SSL Certificates
 certs/
 
+# Build artifacts
+downloads/
+proxy-template/node_modules/
+
 # Logs
 *.log
 npm-debug.log*
