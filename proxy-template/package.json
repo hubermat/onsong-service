@@ -23,5 +23,8 @@
     "bonjour-service": "^1.2.1",
     "ws": "^8.14.2",
     "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.1"
   }
 }

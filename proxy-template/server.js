@@ -9,20 +9,35 @@ const { promisify } = require('util');
 
 const execAsync = promisify(exec);
 
-// Embedded configuration (replaced at build time)
-const config = {
-  serviceUrl: '__SERVICE_URL__',
-  churchToolsUrl: '__CHURCHTOOLS_URL__',
-  secret: '__SECRET__',
-  location: '__LOCATION__',
-  public: '__PUBLIC__' === 'true',
-  uuid: '__UUID__',
-  validateCertificate: false
-};
+// Load configuration from external config.json file
+let config;
+try {
+  // When running as pkg executable, use process.execPath directory
+  // When running as script, use __dirname
+  const appDir = process.pkg ? path.dirname(process.execPath) : __dirname;
+  const configPath = path.join(appDir, 'config.json');
+  const configData = fs.readFileSync(configPath, 'utf8');
+  config = JSON.parse(configData);
+
+  // Set default values
+  if (config.validateCertificate === undefined) {
+    config.validateCertificate = false;
+  }
+  if (config.location === undefined) {
+    config.location = '';
+  }
+  if (config.public === undefined) {
+    config.public = false;
+  }
+} catch (error) {
+  console.error('Failed to load config.json:', error.message);
+  console.error('Please ensure config.json exists in the same directory as the executable.');
+  process.exit(1);
+}
 
 // Validate configuration
-if (!config.serviceUrl || !config.churchToolsUrl || !config.secret) {
-  console.error('Invalid embedded configuration!');
+if (!config.serviceUrl || !config.churchToolsUrl || !config.secret || !config.uuid) {
+  console.error('Invalid configuration! Missing required fields: serviceUrl, churchToolsUrl, secret, or uuid');
   process.exit(1);
 }
 

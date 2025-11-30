@@ -6,7 +6,9 @@ certs/
 
 # Build artifacts
 downloads/
+builds/
 proxy-template/node_modules/
+proxy-template/dist/
 
 # Logs
 *.log

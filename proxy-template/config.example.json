@@ -1,0 +1,9 @@
+{
+  "serviceUrl": "wss://onsong.feg-karlsruhe.de:443",
+  "churchToolsUrl": "your-instance.church.tools",
+  "secret": "your-secret-key-here",
+  "location": "Main Sanctuary",
+  "public": false,
+  "uuid": "generated-uuid-will-be-here",
+  "validateCertificate": false
+}

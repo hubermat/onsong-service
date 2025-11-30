@@ -143,72 +143,74 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Helper function to build proxy executable
+// Helper function to build proxy package (using pre-built executables)
 async function buildProxyExecutable(os, churchToolsUrl, secret, location, isPublic, uuid) {
   const buildId = crypto.randomBytes(16).toString('hex');
   const tempDir = path.join(__dirname, 'downloads', buildId);
-  const templateDir = path.join(__dirname, 'proxy-template');
+  const buildsDir = path.join(__dirname, 'builds');
 
   try {
     // Create temp directory
     await fs.promises.mkdir(tempDir, { recursive: true });
     console.log(`Created temp directory: ${tempDir}`);
 
-    // Copy proxy-template to temp directory
-    await fs.promises.cp(templateDir, tempDir, { recursive: true });
-    console.log(`Copied proxy-template to temp directory`);
-
-    // Read server.js and replace placeholders
-    const serverJsPath = path.join(tempDir, 'server.js');
-    let serverJs = await fs.promises.readFile(serverJsPath, 'utf8');
-
-    serverJs = serverJs.replace('__SERVICE_URL__', SERVICE_URL);
-    serverJs = serverJs.replace('__CHURCHTOOLS_URL__', churchToolsUrl);
-    serverJs = serverJs.replace('__SECRET__', secret);
-    serverJs = serverJs.replace('__LOCATION__', location);
-    serverJs = serverJs.replace('__PUBLIC__', isPublic.toString());
-    serverJs = serverJs.replace('__UUID__', uuid);
-
-    await fs.promises.writeFile(serverJsPath, serverJs);
-    console.log(`Replaced configuration placeholders`);
-
-    // Run npm install
-    console.log(`Installing dependencies in ${tempDir}`);
-    await execAsync('npm install --production', { cwd: tempDir });
-    console.log(`Dependencies installed`);
-
-    // Determine pkg target based on OS
-    const pkgTargets = {
-      'macos': 'node18-macos-x64',
-      'linux': 'node18-linux-x64',
-      'windows': 'node18-win-x64'
+    // Determine executable names
+    const executableNames = {
+      'macos': 'onsong-proxy-macos',
+      'linux': 'onsong-proxy-linux',
+      'windows': 'onsong-proxy-windows.exe'
     };
 
-    const target = pkgTargets[os];
-    if (!target) {
+    const prebuiltName = executableNames[os];
+    if (!prebuiltName) {
       throw new Error(`Unsupported OS: ${os}`);
     }
 
-    const outputName = os === 'windows' ? 'onsong-proxy.exe' : 'onsong-proxy';
-    const outputPath = path.join(tempDir, outputName);
+    const prebuiltPath = path.join(buildsDir, prebuiltName);
 
-    // Build executable with pkg
-    console.log(`Building executable for ${os} (target: ${target})`);
-    const pkgCommand = `npx pkg server.js --target ${target} --output ${outputName}`;
-    await execAsync(pkgCommand, { cwd: tempDir, maxBuffer: 50 * 1024 * 1024 });
-    console.log(`Executable built: ${outputPath}`);
-
-    // Check if executable exists
-    if (!fs.existsSync(outputPath)) {
-      throw new Error(`Executable not found at ${outputPath}`);
+    // Check if pre-built executable exists
+    if (!fs.existsSync(prebuiltPath)) {
+      throw new Error(`Pre-built executable not found: ${prebuiltPath}. Please run 'npm run build-executables' first.`);
     }
 
-    // Create ZIP file with executable and INSTALL.md
+    // Copy pre-built executable to temp directory
+    const outputName = os === 'windows' ? 'onsong-proxy.exe' : 'onsong-proxy';
+    const outputPath = path.join(tempDir, outputName);
+    await fs.promises.copyFile(prebuiltPath, outputPath);
+    console.log(`Copied pre-built executable: ${prebuiltName}`);
+
+    // Make executable on Unix systems
+    if (os !== 'windows') {
+      await fs.promises.chmod(outputPath, 0o755);
+    }
+
+    // Generate config.json
+    const configPath = path.join(tempDir, 'config.json');
+    const config = {
+      serviceUrl: SERVICE_URL,
+      churchToolsUrl: churchToolsUrl,
+      secret: secret,
+      location: location,
+      public: isPublic,
+      uuid: uuid,
+      validateCertificate: false
+    };
+    await fs.promises.writeFile(configPath, JSON.stringify(config, null, 2));
+    console.log(`Generated config.json`);
+
+    // Copy INSTALL.md if it exists
+    const installMdSource = path.join(__dirname, 'proxy-template', 'INSTALL.md');
+    if (fs.existsSync(installMdSource)) {
+      const installMdDest = path.join(tempDir, 'INSTALL.md');
+      await fs.promises.copyFile(installMdSource, installMdDest);
+    }
+
+    // Create ZIP file with executable, config.json, and INSTALL.md
     const zipName = os === 'windows' ? 'onsong-proxy-windows.zip' : `onsong-proxy-${os}.zip`;
     const zipPath = path.join(tempDir, zipName);
 
     console.log(`Creating ZIP package: ${zipPath}`);
-    await createZipPackage(tempDir, outputPath, outputName, zipPath);
+    await createZipPackage(tempDir, zipPath);
     console.log(`ZIP package created`);
 
     return { buildId, zipPath, zipName };
@@ -224,7 +226,7 @@ async function buildProxyExecutable(os, churchToolsUrl, secret, location, isPubl
 }
 
 // Helper function to create ZIP package
-function createZipPackage(tempDir, executablePath, executableName, zipPath) {
+function createZipPackage(tempDir, zipPath) {
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(zipPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
@@ -240,13 +242,16 @@ function createZipPackage(tempDir, executablePath, executableName, zipPath) {
 
     archive.pipe(output);
 
-    // Add executable
-    archive.file(executablePath, { name: executableName });
+    // Add all files from temp directory (except the ZIP itself)
+    const files = fs.readdirSync(tempDir);
+    for (const file of files) {
+      const filePath = path.join(tempDir, file);
+      const stat = fs.statSync(filePath);
 
-    // Add INSTALL.md
-    const installMdPath = path.join(tempDir, 'INSTALL.md');
-    if (fs.existsSync(installMdPath)) {
-      archive.file(installMdPath, { name: 'INSTALL.md' });
+      if (stat.isFile() && !file.endsWith('.zip')) {
+        archive.file(filePath, { name: file });
+        console.log(`  Added to ZIP: ${file}`);
+      }
     }
 
     archive.finalize();
